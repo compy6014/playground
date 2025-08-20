@@ -1,0 +1,184 @@
+name: AI Code Porting trigger
+
+on:
+  pull_request:
+    types: [opened, closed]
+    branches:
+      - 'amd/stg/mva_vhd'
+      - 'amd/stg/umsch'
+      - 'amd/stg/vcn'
+      - 'amd/stg/jpeg'
+      - 'amd/stg/oglp'
+      - 'amd/stg/pplib'
+      - 'amd/release/25.20.00.11'
+      - 'amd/release/24.30.00.27'
+      # Add other source branches as needed
+
+jobs:
+  post-comment:
+    # Only runs when PR is opened
+    if: ${{ github.event.action == 'opened' }}
+    runs-on: ai-codeql-fix-set
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4.2.2
+        
+      - name: Read branch configuration
+        id: load_branches
+        run: |
+          SOURCE_BRANCH="${{ github.base_ref }}"
+          echo "Source branch: ${SOURCE_BRANCH}"
+          
+          # Read the config file
+          CONFIG_PATH=".github/.ai_pr_platform/codeporting.json"
+          if [ ! -f "$CONFIG_PATH" ]; then
+            echo "Config file not found: ${CONFIG_PATH}"
+            echo "TARGETS_FOUND=false" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          # Store the config file as base64
+          echo "BRANCHES=$(base64 -w 0 $CONFIG_PATH)" >> $GITHUB_ENV
+          echo "SOURCE_BRANCH=${SOURCE_BRANCH}" >> $GITHUB_ENV
+          
+      - name: Post Code Porting comment
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.AI_GH_TOKEN }}
+          script: |
+            const branchesBase64 = process.env.BRANCHES;
+            const branchesJson = Buffer.from(branchesBase64, 'base64').toString('utf-8');
+            const configData = JSON.parse(branchesJson);
+            const sourceBranch = process.env.SOURCE_BRANCH;
+            
+            // Check if source branch exists in config
+            if (!configData[sourceBranch] || !configData[sourceBranch].target_branches) {
+              console.log(`No target_branches configuration found for source branch: ${sourceBranch}`);
+              return;
+            }
+            
+            const targetBranches = configData[sourceBranch].target_branches;
+            const targetSelection = configData[sourceBranch].target_selection !== false; // Default to true if not specified
+            
+            if (!Array.isArray(targetBranches) || targetBranches.length === 0) {
+              console.log(`No target branches defined for source branch: ${sourceBranch}`);
+              return;
+            }
+            let body;
+            
+            if (targetSelection) {
+              // Show checkboxes for selection
+              let checkboxList = targetBranches
+                .map(branch => `- [ ] ${branch}`)
+                .join('\n');
+              
+              body = `## AI Code Porting\n\n**Please select the branches where you'd like to port your changes to:**\n${checkboxList}\n\nFor accurate porting:\n* Please use **Squash and Merge** when merging this PR. This ensures the porting tool treats the entire change as a single unit.\n* If you use **Merge** instead of Squash, you must include the corresponding **Ticket ID** in the **merge commit message** so that our system can track and port the change correctly. If the Ticket ID is missing, the change may not be ported automatically.`;
+            } else {
+              // Port to all branches from config
+              let branchList = targetBranches
+                .map(branch => `- ${branch}`)
+                .join('\n');
+              body = `## AI Code Porting\n\n**Your changes will be automatically ported to to the following branches when this PR is merged:**\n${branchList}\n\nFor accurate porting:\n* Please use **Squash and Merge** when merging this PR. This ensures the porting tool treats the entire change as a single unit.\n* If you use **Merge** instead of Squash, you must include the corresponding **Ticket ID** in the **merge commit message** so that our system can track and port the change correctly. If the Ticket ID is missing, the change may not be ported automatically.`;
+            }
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+  extract-branches:
+    # Only run this job when a PR is merged
+    if: ${{ github.event.action == 'closed' && github.event.pull_request.merged == true }}
+    runs-on: ai-codeql-fix-set
+    outputs:
+      selected_branches: ${{ steps.extract.outputs.selected_branches }}
+      merged_commit_sha: ${{ steps.extract.outputs.merged_commit_sha }}
+    steps:
+      - name: Extract selected branches from Code Porting comment
+        id: extract
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.AI_GH_TOKEN }}
+          script: |
+            // Get the merged commit SHA from the pull request
+            const mergedCommitSha = context.payload.pull_request.merge_commit_sha;
+            core.setOutput('merged_commit_sha', mergedCommitSha);
+
+            try {
+              // Get all comments on PR
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number
+              });
+
+              console.log(`Found ${comments.length} comments on PR`);
+
+              // Find comment by header
+              const codePortingComment = comments.find(
+                comment => comment.body && comment.body.startsWith('## Code Porting')
+              );
+
+              if (!codePortingComment) {
+                console.log("No Code porting comment found");
+                core.setOutput('selected_branches', '');
+                return;
+              }
+
+              console.log("Found Code Porting comment");
+              // Check comment type based
+              const hasCheckboxes = codePortingComment.body.includes('- [ ]') ||
+                codePortingComment.body.includes('- [x]');
+
+              let selectedBranches = [];
+
+              if (hasCheckboxes) {
+                // Extract selected targets
+                selectedBranches = codePortingComment.body
+                  .split('\n')
+                  .filter(line => /^-\s*\[x\]/i.test(line))
+                  .map(line => line.replace(/^-\s*\[x\]\s*/i, '').trim());
+              } else {
+                // Extract all target branches
+                selectedBranches = codePortingComment.body
+                  .split('\n')
+                  .filter(line => line.trim().startsWith('- '))
+                  .map(line => line.replace(/^-\s*/, '').trim());
+              }
+
+              console.log("Extracted branches:", selectedBranches);
+
+              if (selectedBranches.length === 0) {
+                console.log("No branches were found in comment");
+                core.setOutput('selected_branches', '');
+                return;
+              }
+
+              core.setOutput('selected_branches', selectedBranches.join(','));
+     
+              console.log("Running Code Porting with parameters:");
+              console.log("Merged commit SHA:", mergedCommitSha);
+              console.log("Organization:", context.repo.owner);
+              console.log("Repository:", context.repo.repo);
+              console.log("Selected branches:", selectedBranches.join(','));
+            } catch (error) {
+              console.error("Error in extract-branches step:", error);
+              console.error(error.stack);
+              core.setOutput('selected_branches', '');
+            }
+
+  # Call the CodePorting reusable workflow for each selected branch  
+  call-codeporting-workflow:  
+    needs: extract-branches  
+    if: ${{ needs.extract-branches.outputs.selected_branches != '' }}  
+    uses: AMD-GH-Actions/ai-pr-platform-actions-lib/.github/workflows/codeporting_reusable.yml@main  
+    with:  
+      commit_id: ${{ needs.extract-branches.outputs.merged_commit_sha }}  
+      source_branch: ${{ github.base_ref }} # The branch that the PR was merged into 
+      target_branch: ${{ needs.extract-branches.outputs.selected_branches }} # Comma-separated list of selected branches
+      repo_url: "${{ github.server_url }}/${{ github.repository }}"
+    secrets:  
+      codeql_token: ${{ secrets.AI_CODEQL_API_KEY }}  
+      gh_token: ${{ secrets.AI_GH_TOKEN }}

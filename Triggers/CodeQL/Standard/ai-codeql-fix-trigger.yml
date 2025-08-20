@@ -1,0 +1,21 @@
+name: AI CodeQL Fix
+
+on:
+  schedule:
+    - cron: '0 12 * * *'
+
+jobs:
+  call_codeql_reusable_workflow:
+    uses: AMD-GH-Actions/ai-pr-platform-actions-lib/.github/workflows/reusable_codeql.yml@main
+    with:
+      team_name: dal
+      alerts: ''
+      from_date: ''
+      to_date: ''
+      filter_by_rules: ''
+      trigger_event: ${{ github.event_name }}
+      enable_code_evaluation: true
+    secrets:
+      gh_token: ${{ secrets.AI_GH_TOKEN }}
+      codeql_token: ${{ secrets.AI_CODEQL_API_KEY }}
+      code_evaluation_api_token: ${{ secrets.CODE_EVALUATION_API_TOKEN }}
