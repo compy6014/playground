@@ -1,0 +1,16 @@
+{
+   "amd/dev/imirosav/cp_test_1": {
+      "target_selection": true,
+      "target_branches": [
+         "SW-Infra-EMU/ai-pr-platform/amd/bg-release/24.30/test",
+         "SW-Infra-EMU/ai-pr-platform/amd/bg-release/25.10/test"
+      ]
+   },
+   "amd/dev/imirosav/cp_test_2": {
+      "target_selection": false,
+      "target_branches": [
+         "SW-Infra-EMU/ai-pr-platform/amd/bg-release/24.30/test_2",
+         "SW-Infra-EMU/ai-pr-platform/amd/bg-release/25.10/test_2"
+      ]
+   }
+}
