@@ -1,0 +1,222 @@
+####CHAIN FILTERS - NABU
+
+
+To accommodate the requirement of using both `response_filter` and `post_filter` together, we need to ensure that the workflow first applies the `post_filter` to the response and then applies the `response_filter` to the already filtered results. The current implementation of `_filter_response` and `_apply_post_filters` should be more explicitly designed to work in this manner.
+
+Here's how we can improve your implementation:
+
+1. **Apply Post Filters First**: This ensures that we process the response and filter it based on the post conditions first before we apply the extraction of specific values.
+   
+2. **Chain Filters**: After applying the `post_filter`, we will apply the `response_filter` on the already filtered result.
+
+Here’s an updated version of the `make_request` method that maintains this order:
+
+```python
+def make_request(self, request_name, **params):  
+    """Uses predefined request templates to execute API calls"""  
+    template = ConfigLoader.load_request_template(self.api_name, request_name)  
+    method = template.get("method", "GET").upper()  
+    header_type = template.get("header_type", None)  
+    variable_types = template.get("variable_types", {})  
+
+    # Format variables based on template
+    formatted_variables = {}
+    for key, value in template.get("variables", {}).items():  
+        if isinstance(params.get(key), list):  
+            formatted_variables[key] = ",".join(map(str, params[key]))  
+        else:  
+            formatted_variables[key] = str(value).format(**params)  
+
+    # Cast variables to specified types  
+    final_variables = {  
+        key: int(value) if variable_types.get(key) == "int"  
+        else bool(value) if variable_types.get(key) == "bool"  
+        else value  
+        for key, value in formatted_variables.items()  
+    }  
+
+    # Process endpoint
+    raw_endpoint = template.get("endpoint", "")  
+    if "?" in raw_endpoint:  
+        endpoint, query_string = raw_endpoint.split("?", 1)  
+        endpoint = endpoint.format(**final_variables)  
+        query_params = dict(param.split("=") for param in query_string.split("&"))  
+        formatted_query_params = {key: final_variables.get(value.strip("{}"), value) for key, value in query_params.items()}  
+        formatted_endpoint = f"{endpoint}?{urlencode(formatted_query_params)}"
+    else:  
+        formatted_endpoint = raw_endpoint.format(**final_variables)  
+
+    json_data = None  
+
+    # Handle request types
+    if "query" in template or "query_file" in template:  
+        data = {}  
+        if "query" in template:  
+            data["query"] = template["query"]  
+        elif "query_file" in template:  
+            data["query"] = ConfigLoader.load_query(template["query_file"])  
+        data["variables"] = final_variables  
+        json_data = data  
+    else:  
+        if method != "GET":  
+            json_data = {  
+                key: params[key] if key in params and isinstance(params[key], list) else params.get(key, None)  
+                for key in template.get("body_params", [])  
+            }  
+
+    response = self.request(method, endpoint=formatted_endpoint, json=json_data, header_type=header_type)  
+
+    # First apply post filters
+    post_filters = template.get("post_filter")  
+    if post_filters:  
+        response = self._apply_post_filters(response, post_filters, params)  
+
+    # Then apply response filter
+    response_filter = template.get("response_filter")  
+    if response_filter:  
+        response = self._filter_response(response, response_filter)  
+
+    return response  
+```
+
+### Key Changes Made:
+- **Ordering of Filters**: Post filters are applied before response filters, allowing the output of the first to serve as the input for the second.
+- **Comment Adjustments**: To clarify the operations being performed at each stage, I have included comments explaining that the response is first filtered before specific values are extracted.
+
+### Testing the Implementation
+Make sure to test the following scenarios:
+- Basic filtering with only post filters.
+- Basic filtering with only response filters.
+- Combining both filters: Using post-filter to filter out data according to specified conditions first, then using response filter to extract the desired fields from the already filtered results.
+
+With this setup, you should be able to handle your example of filtering out alerts between two dates and then extracting specific fields from those filtered alerts effectively.
+
+
+####SECOND STEP
+
+
+The `_filter_response` and `_apply_post_filters` methods largely fulfill their purpose as designed, but there are some improvements we can make to ensure they work seamlessly together and handle cases where the expected output types might differ. Here’s a walkthrough of some potential enhancements:
+
+### Enhancements in `_filter_response`
+
+1. **Type Consistency**: Ensure that the return values are more consistently typed. For example, if `response` is a list, the output should always be a list, and similarly for dicts.
+
+2. **Avoid Overwriting Values**: When filtering responses, ensure that items that evaluate to falsy but are not `None` are not accidentally filtered out.
+
+### Suggested Changes to `_filter_response`
+
+```python
+def _filter_response(self, response, response_filter):  
+    """Filters response based on response_filter in request_templates.json"""  
+    if not response_filter:  
+        return response  
+  
+    if not isinstance(response_filter, list):  
+        response_filter = [response_filter]  # Ensure it’s a list  
+  
+    extracted_values = []  
+  
+    def extract_from_item(item):  
+        """Extracts all filter values from a single response item (dict or list)"""  
+        item_values = []  
+  
+        for filter_path in response_filter:  
+            value = self._extract_value(item, filter_path)  
+            if value is not None:  # Accept both True and False, avoid None  
+                item_values.append(value)  
+  
+        # If values are found, return them; otherwise return an appropriate type  
+        if len(item_values) == 0:  
+            return None if isinstance(item, dict) else []  # Respect the type of item  
+          
+        return item_values if len(item_values) > 1 else item_values[0]  # Return a singular value or list  
+  
+    # Process the response based on its type  
+    if isinstance(response, list):  
+        extracted_values = [extract_from_item(item) for item in response if item is not None]  
+    else:  
+        single_extracted = extract_from_item(response)
+        extracted_values = [single_extracted] if single_extracted is not None else []  
+
+    # Handle what to return based on the collected results  
+    if not extracted_values:  
+        return []  # Return an empty list if nothing found  
+  
+    return extracted_values if len(extracted_values) > 1 else extracted_values[0]  # Return a single item or list  
+```
+
+### Enhancements in `_apply_post_filters`
+
+1. **Return Type Management**: Ensure consistent return types, always returning a list regardless of the input.
+
+2. **Error Handling**: Add better error handling and logging for potential issues when filtering through the items.
+
+### Suggested Changes to `_apply_post_filters`
+
+```python
+def _apply_post_filters(self, response, post_filters, params):
+    """Applies multiple post processing filters in order, nested field support to be added"""
+    
+    if not post_filters or not isinstance(response, list):
+        return response if isinstance(response, list) else [response]
+    
+    filtered_response = response
+    
+    for post_filter in post_filters:
+        filter_type = post_filter.get("type")
+        field_path = post_filter.get("field")
+ 
+        if filter_type == "date_range":
+            from_date = params.get("from_date")
+            to_date = params.get("to_date") or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            if field_path and (from_date or to_date):
+                new_filtered_response = []
+
+                for item in filtered_response:
+                    raw_date = self._extract_value(item, field_path)
+                    if raw_date:
+                        try:
+                            item_date = datetime.strptime(raw_date, "%Y-%m-%dT%H:%M:%SZ")
+
+                            if from_date and item_date < datetime.strptime(from_date, "%Y-%m-%dT%H:%M:%SZ"):
+                                continue
+                            if to_date and item_date > datetime.strptime(to_date, "%Y-%m-%dT%H:%M:%SZ"):
+                                continue
+                            
+                            new_filtered_response.append(item)
+
+                        except ValueError:
+                            continue
+                        
+                filtered_response = new_filtered_response
+
+        elif filter_type == "value_match":
+            expected_value = params.get(post_filter.get("param_name"))
+            match_mode = params.get("match_mode", True)
+
+            if expected_value is not None:
+                if not isinstance(expected_value, list):
+                    expected_value = [expected_value]
+
+                new_filtered_response = []
+
+                for item in filtered_response:
+                    field_value = self._extract_value(item, field_path)
+                    
+                    if (match_mode and field_value in expected_value) or (not match_mode and field_value not in expected_value):
+                        new_filtered_response.append(item)
+
+                filtered_response = new_filtered_response  
+
+    return filtered_response if filtered_response else [] # Ensure we return a list
+```
+
+### Summary of Changes
+1. **Consistency in Return Types**: Ensured that both methods return types that are more predictable, especially when no matches are found—returning an empty list instead of `None`.
+  
+2. **Improved Logic Handling**: Avoid overwriting values accidentally due to implicit falsy evaluations by deriving checks more robustly.
+
+3. **Better Error Handling**: Ensure that exceptions during parsing operations (e.g., date strings) do not cause the method to fail completely but instead allow it to skip the offending items. 
+
+These refinements should help maintain the overall structure of your API class while ensuring compatibility and reliability when applying multiple types of filters in sequence.
